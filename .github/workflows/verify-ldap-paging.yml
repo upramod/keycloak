@@ -1,0 +1,42 @@
+# Fork-only regression harness; not part of the upstream PR.
+name: Verify LDAP paging cleanup safety
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/verify-ldap-paging.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  ldap-role-mapper:
+    if: github.repository == 'upramod/keycloak'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 55b5c836f4a7f099f17fab0149f7721249585ea6
+          persist-credentials: false
+      - name: Record tested source
+        run: git log -1 --format='%H %s'
+      - uses: ./.github/actions/update-hosts
+      - uses: ./.github/actions/java-setup
+      - uses: ./.github/actions/maven-cache
+      # This PR changes only LDAPRoleMapperTest since the successful build below.
+      # Reuse its production artifacts and compile the test from the exact PR head.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: m2-keycloak.tzts
+          run-id: 36038861346
+          github-token: ${{ github.token }}
+      - name: Restore production artifacts
+        run: tar -C ~/ --use-compress-program="zstd -d" -xf m2-keycloak.tzts
+      - name: Run LDAP role mapper integration tests
+        run: ./mvnw -B -nsu test -Pauth-server-quarkus -Dtest=LDAPRoleMapperTest -Dsurefire.rerunFailingTestsCount=0 -pl testsuite/integration-arquillian/tests/base
+      - name: Preserve test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ldap-role-mapper-reports
+          path: testsuite/integration-arquillian/tests/base/target/surefire-reports/
