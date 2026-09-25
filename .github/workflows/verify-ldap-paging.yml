@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 55b5c836f4a7f099f17fab0149f7721249585ea6
+          ref: de2f3e445d0e887d765f715af3a17cf1d9b55c56
           persist-credentials: false
       - name: Record tested source
         run: git log -1 --format='%H %s'
