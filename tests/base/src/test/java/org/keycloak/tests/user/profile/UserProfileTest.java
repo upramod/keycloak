@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.stream.Stream;
 
 import jakarta.ws.rs.core.Response;
 
@@ -46,6 +47,7 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.RequiredActionProviderModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.UserModel.RequiredAction;
+import org.keycloak.models.utils.UserModelDelegate;
 import org.keycloak.representations.idm.AbstractUserRepresentation;
 import org.keycloak.representations.idm.ClientRepresentation;
 import org.keycloak.representations.idm.RealmRepresentation;
@@ -83,6 +85,7 @@ import org.keycloak.userprofile.validator.UsernameIDNHomographValidator;
 import org.keycloak.validate.ValidationError;
 import org.keycloak.validate.validators.EmailValidator;
 import org.keycloak.validate.validators.LengthValidator;
+import org.keycloak.validate.validators.OptionsValidator;
 import org.keycloak.validate.validators.UriValidator;
 
 import org.hamcrest.Matchers;
@@ -196,6 +199,61 @@ public class UserProfileTest extends AbstractUserProfileTest {
                 assertTrue(ve.hasError(LengthValidator.MESSAGE_INVALID_LENGTH));
             }
         });
+    }
+
+    @Test
+    public void testReadOnlyUsernameAllowsCaseOnlyDifference() {
+        getTestingClient().server(TEST_REALM_NAME)
+                .run((RunOnServer) UserProfileTest::testReadOnlyUsernameAllowsCaseOnlyDifference);
+    }
+
+    private static void testReadOnlyUsernameAllowsCaseOnlyDifference(KeycloakSession session) {
+        RealmModel realm = session.getContext().getRealm();
+        boolean editUsernameAllowed = realm.isEditUsernameAllowed();
+        UserModel user = session.users().addUser(realm, "ldap-case-user");
+        user.setEmail("ldap-case-user@keycloak.org");
+        user.setFirstName("LDAP");
+        user.setLastName("User");
+
+        try {
+            realm.setEditUsernameAllowed(false);
+
+            UserModel ldapUser = new UserModelDelegate(user) {
+                @Override
+                public boolean isFederated() {
+                    return true;
+                }
+
+                @Override
+                public String getFirstAttribute(String name) {
+                    if (UserModel.USERNAME.equals(name)) {
+                        return "LDAP-Case-User";
+                    }
+                    return super.getFirstAttribute(name);
+                }
+
+                @Override
+                public Stream<String> getAttributeStream(String name) {
+                    if (UserModel.USERNAME.equals(name)) {
+                        return Stream.of("LDAP-Case-User");
+                    }
+                    return super.getAttributeStream(name);
+                }
+            };
+
+            Map<String, Object> attributes = new HashMap<>();
+            attributes.put(UserModel.USERNAME, "ldap-case-user");
+            attributes.put(UserModel.EMAIL, user.getEmail());
+            attributes.put(UserModel.FIRST_NAME, user.getFirstName());
+            attributes.put(UserModel.LAST_NAME, user.getLastName());
+
+            UserProfileProvider provider = getUserProfileProvider(session);
+            UserProfile profile = provider.create(UserProfileContext.ACCOUNT, attributes, ldapUser);
+            profile.validate();
+        } finally {
+            realm.setEditUsernameAllowed(editUsernameAllowed);
+            session.users().removeUser(realm, user);
+        }
     }
 
     private static void testIdempotentProfile(KeycloakSession session) {
@@ -1410,6 +1468,56 @@ public class UserProfileTest extends AbstractUserProfileTest {
 
         profile = provider.create(UserProfileContext.UPDATE_PROFILE, attributes);
         profile.validate();
+    }
+
+    @Test
+    public void testRequiredMultivaluedAttributeWithBlankValue() {
+        getTestingClient().server(TEST_REALM_NAME).run((RunOnServer) UserProfileTest::testRequiredMultivaluedAttributeWithBlankValue);
+    }
+
+    private static void testRequiredMultivaluedAttributeWithBlankValue(KeycloakSession session) {
+        UserProfileProvider provider = getUserProfileProvider(session);
+        UPConfig config = UPConfigUtils.parseSystemDefaultConfig();
+        UPAttribute attribute = new UPAttribute(ATT_ADDRESS, new UPAttributePermissions(Set.of(), Set.of(ROLE_USER)), new UPAttributeRequired());
+        attribute.setMultivalued(true);
+        attribute.addValidation(OptionsValidator.ID, Map.of(OptionsValidator.KEY_OPTIONS, List.of("opt1", "opt2")));
+        config.addOrReplaceAttribute(attribute);
+        config.addOrReplaceAttribute(new UPAttribute("department", new UPAttributePermissions(Set.of(), Set.of(ROLE_USER)), new UPAttributeRequired()));
+        provider.setConfiguration(config);
+
+        Map<String, Object> attributes = new HashMap<>();
+        attributes.put(UserModel.USERNAME, org.keycloak.models.utils.KeycloakModelUtils.generateId());
+        attributes.put(UserModel.FIRST_NAME, "John");
+        attributes.put(UserModel.LAST_NAME, "Doe");
+        attributes.put(UserModel.EMAIL, org.keycloak.models.utils.KeycloakModelUtils.generateId() + "@keycloak.org");
+        attributes.put("department", "sales");
+
+        // a value that is blank according to String.isBlank() would not be stored, so it does not satisfy the required check
+        attributes.put(ATT_ADDRESS, List.of("opt1"));
+        attributes.put("department", List.of(" "));
+        try {
+            provider.create(UserProfileContext.REGISTRATION, attributes).validate();
+            fail("Should fail validation");
+        } catch (ValidationException ve) {
+            assertTrue(ve.isAttributeOnError("department"));
+        }
+        attributes.put("department", "sales");
+
+        // only blank values, as sent by the login theme when no checkbox is selected
+        attributes.put(ATT_ADDRESS, List.of(""));
+        try {
+            provider.create(UserProfileContext.REGISTRATION, attributes).validate();
+            fail("Should fail validation");
+        } catch (ValidationException ve) {
+            assertTrue(ve.isAttributeOnError(ATT_ADDRESS));
+        }
+
+        // blank value sent together with the selected values
+        attributes.put(ATT_ADDRESS, List.of("", "opt1", "opt2"));
+        UserProfile profile = provider.create(UserProfileContext.REGISTRATION, attributes);
+        profile.validate();
+        UserModel user = profile.create();
+        assertThat(user.getAttributes().get(ATT_ADDRESS), containsInAnyOrder("opt1", "opt2"));
     }
 
     @Test
